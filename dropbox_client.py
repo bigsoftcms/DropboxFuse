@@ -3,14 +3,20 @@
 
 import dropbox
 from dropbox_config import DropboxConfiguration
+from dropbox_logger import DropboxLogger
 
 
 class DropboxClient(dropbox.client.DropboxClient):
     def __init__(self, config, app_key=None, app_secret=None, access_token=None):
+        # logger
+        self.logger = DropboxLogger(self)
+
         self.config = DropboxConfiguration(config)
         if not ('app_key' in self.config and 'app_secret' in self.config):
             if app_key is None or app_secret is None:
-                raise Exception('app_secret AND app_secret needs to be valid')
+                msg = 'app_secret AND app_secret needs to be valid'
+                self.logger.error(msg)
+                raise Exception(msg)
             self.config['app_key'] = app_key
             self.config['app_secret'] = app_secret
 

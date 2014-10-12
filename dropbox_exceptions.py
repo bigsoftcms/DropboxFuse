@@ -12,3 +12,7 @@ class UploadError(Exception):
 
 class DownloadError(Exception):
     pass
+
+
+class StreamReadBlock(DownloadError):
+    pass

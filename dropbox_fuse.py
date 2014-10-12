@@ -9,27 +9,32 @@ import argparse
 import time
 import stat
 
+import dropbox
 from dropbox_exceptions import UploadError, FileNotFoundError
 from dropbox_client import DropboxClient
-from dropbox_cache import Cache, CacheEntry
-from dropbox_downloader import DropboxDownloader
+from dropbox_cache import CacheManager, MetadataCache, MetadataCacheEntry, DataCache
+from dropbox_downloader import DropboxDownloadManager
 from dropbox_uploader import DropboxUploader
+from dropbox_logger import DropboxLogger
 
 
 class DropboxFuse(fuse.Operations):
     def __init__(self, dropbox_client):
+        # logger
+        self.logger = DropboxLogger(self)
+        # dropbox api client
         self.client = dropbox_client
-        self.now = time.time()
-
         # cache init
-        self.cache = Cache(self.client)
+        self.cache = CacheManager.get_cache('MetadataCache')
         self.cache.get_entry('/')
+        # downloader
+        self.download_manager = DropboxDownloadManager(dropbox_client)
 
     def getattr(self, path, fh=None):
+        self.logger.info('getattr %s', path)
         try:
             cache_entry = self.cache.get_entry(path)
         except FileNotFoundError as e:
-            print e
             raise fuse.FuseOSError(os.errno.ENOENT)
 
         now = time.time()
@@ -49,6 +54,7 @@ class DropboxFuse(fuse.Operations):
         return ret
 
     def mkdir(self, path, fh=None):
+        self.logger.info('mkdir %s', path)
         cache_entry = self.cache.get_entry(path, create=False)
         if cache_entry is not None:
             return -os.errno.EEXIST
@@ -59,27 +65,32 @@ class DropboxFuse(fuse.Operations):
             print e
             return -os.errno.EBADR
 
-        cache_entry = CacheEntry(path, self.client, metadata=metadata)
+        cache_entry = MetadataCacheEntry(path, self.client, metadata=metadata)
         self.cache.set_entry(path, cache_entry)
         self.cache.set_parent_dirty(cache_entry)
         return 0
 
     def mknod(self, path, mode, dev):
+        self.logger.info('mknod %s', path)
         raise fuse.FuseOSError(os.errno.EACCES)
 
     def create(self, path, mode, fh=None):
+        self.logger.info('create %s', path)
         cache_entry = self.cache.get_entry(path, create=False)
         should_overwrite = True if cache_entry is not None else False
         if cache_entry is None:
-            cache_entry = CacheEntry(path, self.client)
+            self.logger.info('creating MetadataCacheEntry')
+            cache_entry = MetadataCacheEntry(path, self.client)
 
         if cache_entry.uploader is not None:
+            self.logger.info('uploader already exists, setting fuse as EBUSY')
             raise fuse.FuseOSError(errno.EBUSY)
 
         cache_entry.uploader = DropboxUploader(path, self.client, overwrite=should_overwrite)
 
         #fakeing a cache entry metadata, will be overwritten later
         #by the real metadata from dropbox
+        cache_entry.dirty = False
         cache_entry.metadata['bytes'] = '0'
         cache_entry.metadata['is_dir'] = False
         cache_entry.metadata['path'] = path
@@ -89,43 +100,43 @@ class DropboxFuse(fuse.Operations):
 
     def open(self, path, flags):
         flags = 32768 - flags
+        self.logger.info('open %s %d', path, flags)
 
         if flags == os.O_RDWR:
-            print 'invalid flags: O_RDWR'
+            self.logger.info('invalid flags: O_RDWR')
             raise fuse.FuseOSError(errno.EINVAL)
 
         if flags == os.O_WRONLY:
             # if it O_WRONLY, let self.create do its thing
-            print 'valid flags: O_WRONLY'
+            self.logger.info('valid flags: O_WRONLY')
             return self.create(path, 0444)
         elif flags != os.O_RDONLY:
             # if there is no O_WRONLY / O_RD_ONLY
-            print 'invalid flags: not O_RDONLY or O_WRONLY'
+            self.logger.error('invalid flags: not O_RDONLY or O_WRONLY')
             raise fuse.FuseOSError(errno.EINVAL)
 
         # in case of O_RDONLY
-        print 'valid flags: O_RDONLY'
+        self.logger.info('valid flags: O_RDONLY')
         try:
             cache_entry = self.cache.get_entry(path, self.client)
         except FileNotFoundError as e:
-            print e
+            self.logger.error('file not found error: %s', path)
             raise fuse.FuseOSError(os.errno.ENOENT)
 
-        if cache_entry.downloader is not None:
-            raise fuse.FuseOSError(errno.EBUSY)
-
-        cache_entry.downloader = DropboxDownloader(path, self.client, cache_entry)
+        fd = self.download_manager.open_file(path)
         self.cache.set_entry(path, cache_entry)
-        return 0
+        return fd
 
     def write(self, path, buf, offset, fh=None):
+        fd = int(fh)
+        self.logger.info('write %s len %d offset %d fd %d', path, len(buf), offset, fd)
         cache_entry = self.cache.get_entry(path, create=False)
         if cache_entry is None:
-            print 'cache inconsistency'
+            self.logger.error('cache inconsistency')
             raise fuse.FuseOSError(os.errno.ENOENT)
 
         if cache_entry.uploader is None:
-            print 'uploader not found'
+            self.logger.error('uploader not found')
             raise fuse.FuseOSError(os.errno.EBADR)
 
         cache_entry.uploader.upload_chunk(buf, offset)
@@ -133,43 +144,51 @@ class DropboxFuse(fuse.Operations):
         return len(buf)
 
     def read(self, path, size, offset, fh):
+        fd = int(fh)
+        self.logger.info('read %s size %d offset %d fd %d', path, size, offset, fd)
+
         cache_entry = self.cache.get_entry(path, create=False)
         if cache_entry is None:
-            print 'cache inconsistency'
+            self.logger.error('cache inconsistency')
             raise fuse.FuseOSError(os.errno.ENOENT)
 
-        if cache_entry.downloader is None:
-            print 'downloader not found'
+        proxy = self.download_manager.download_by_fd(fd)
+        if proxy is None:
+            self.logger.error('downloader proxy not found')
             raise fuse.FuseOSError(os.errno.EBADR)
 
-        buf = cache_entry.downloader.download_chunk(size, offset)
+        buf = proxy.read(size, offset=offset)
         return buf
 
     def release(self, path, fh=None):
+        fd = int(fh)
+        self.logger.info('release %s fd %d', path, fd)
+
         try:
             cache_entry = self.cache.get_entry(path)
         except FileNotFoundError as e:
-            print e
+            self.logger.error('file not found error: %s', path)
             raise fuse.FuseOSError(os.errno.ENOENT)
 
         if cache_entry.uploader is not None:
             try:
                 cache_entry = cache_entry.uploader.commit()
             except UploadError as e:
-                print e
+                self.logger.error('upload error error: %s', str(e))
                 raise fuse.FuseOSError(errno.EIO)
             # replace the old fake entry with the new cache entry
             self.cache.set_entry(path, cache_entry)
 
-        if cache_entry.downloader is not None:
-            cache_entry.downloader = None
-        print 'released', path
+        fd = int(fh)
+        self.download_manager.close_file(fd)
 
     def unlink(self, path):
+        self.logger.info('unlink %s', path)
+
         try:
             cache_entry = self.cache.get_entry(path)
         except FileNotFoundError as e:
-            print e
+            self.logger.error('file not found error: %s', path)
             raise fuse.FuseOSError(os.errno.ENOENT)
 
         self.client.file_delete(path)
@@ -178,10 +197,12 @@ class DropboxFuse(fuse.Operations):
         return 0
 
     def rmdir(self, path):
+        self.logger.info('rmdir %s', path)
+
         try:
             cache_entry = self.cache.get_entry(path)
         except FileNotFoundError as e:
-            print e
+            self.logger.error('file not found error: %s', path)
             raise fuse.FuseOSError(os.errno.ENOENT)
 
         self.client.file_delete(path)
@@ -190,18 +211,22 @@ class DropboxFuse(fuse.Operations):
         return 0
 
     def readdir(self, path, fh):
+        self.logger.info('rmdir %s', path)
+
         try:
             cache_entry = self.cache.get_entry(path)
         except FileNotFoundError as e:
-            print e
+            self.logger.error('file not found error: %s', path)
             raise fuse.FuseOSError(os.errno.ENOENT)
 
         if cache_entry.metadata['is_dir'] is False:
-            raise fuse.ArgumentError('provided path is not a dir')
+            self.logger.error('%s not a directory', path)
+            raise fuse.FuseOSError(errno.ENOTDIR)
 
         files = ['.', '..']
         if not 'contents' in cache_entry.metadata:
             # cache entry might not be full, fetching info
+            self.logger.info('setting metadata cache dirty: %s', cache_entry.path)
             cache_entry.dirty = True
 
         for content in cache_entry.metadata['contents']:
@@ -223,7 +248,8 @@ def main():
     options = parser.parse_args()
     try:
         dropbox_client = DropboxClient(options.config, options.app_key, options.app_secret, options.access_token)
-        print 'client init done'
+        CacheManager.set_cache('MetadataCache', MetadataCache(dropbox_client))
+        CacheManager.set_cache('DataCache', DataCache(dropbox_client))
         dropbox_fuse = DropboxFuse(dropbox_client)
         dbfuse = fuse.FUSE(dropbox_fuse,
                            options.mount_point,
@@ -231,7 +257,6 @@ def main():
     except Exception as e:
         print str(e)
         raise
-        #return -1
     return 0
 
 if __name__ == '__main__':

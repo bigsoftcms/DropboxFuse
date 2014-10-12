@@ -4,46 +4,74 @@
 import os
 import dropbox
 from dropbox_exceptions import FileNotFoundError
+from dropbox_logger import DropboxLogger
 
 
-class Cache(object):
+class CacheManager(object):
+    cache_list = dict()
+
+    @staticmethod
+    def set_cache(name, cache):
+        CacheManager.cache_list[name] = cache
+
+    @staticmethod
+    def get_cache(name):
+        return CacheManager.cache_list[name]
+
+
+class CacheBase(object):
     def __init__(self, client):
+        # logger
+        self.logger = DropboxLogger(self)
+
         self.cache = dict()
         self.client = client
 
     def get_cache(self):
         return self.cache
 
-    def get_entry(self, path, create=True):
-        cache_entry = self.cache.get(path)
-        if cache_entry is None:
-            print 'cache miss', path
-            if create is False:
-                return None
-
-            cache_entry = CacheEntry(path, self.client).fetch()
-            self.set_entry(path, cache_entry)
-
-            if cache_entry.metadata['is_dir'] is True:
-                print 'cache: its a dir, recursing'
-                for content in cache_entry.metadata['contents']:
-                    path = content['path']
-                    print 'cache: adding', path
-                    self.set_entry(path, CacheEntry(path, self.client, metadata=content))
-        else:
-            print 'cache hit', path
-        return cache_entry
+    def get_entry(self, path):
+        self.logger.info('getting entry for %s', path)
 
     def set_entry(self, path, entry):
-        assert isinstance(entry, CacheEntry)
+        self.logger.debug('setting entry for %s', path)
         assert isinstance(path, (str, unicode))
         self.cache[path] = entry
 
     def remove_entry(self, path):
+        self.logger.info('removing entry for %s', path)
         assert path in self.cache, 'path is not in cache'
         del self.cache[path]
 
+
+class MetadataCache(CacheBase):
+    def get_entry(self, path, create=True):
+        super(MetadataCache, self).get_entry(path)
+        cache_entry = self.cache.get(path)
+        if cache_entry is None:
+            self.logger.info('cache miss %s', path)
+            if create is False:
+                return None
+
+            cache_entry = MetadataCacheEntry(path, self.client).fetch()
+            self.set_entry(path, cache_entry)
+
+            if cache_entry.metadata['is_dir'] is True:
+                self.logger.info('its a dir --> precaching sub-entries')
+                for content in cache_entry.metadata['contents']:
+                    path = content['path']
+                    self.logger.info('adding %s', path)
+                    self.set_entry(path, MetadataCacheEntry(path, self.client, metadata=content))
+        else:
+            self.logger.info('cache hit %s', path)
+        return cache_entry
+
+    def set_entry(self, path, entry):
+        assert isinstance(entry, MetadataCacheEntry)
+        super(MetadataCache, self).set_entry(path, entry)
+
     def set_parent_dirty(self, cache_entry):
+        self.logger.info('%s: setting parent entry as dirty', cache_entry.path)
         path = cache_entry.path
         path = os.path.dirname(path)
 
@@ -51,39 +79,19 @@ class Cache(object):
             cache_entry = self.get_entry(path)
             cache_entry.dirty = True
         except FileNotFoundError as e:
-            print 'parent not found, not setting dirty flag', e
+            self.logger.error('parent not found, not setting dirty flag %s', e)
 
 
-class CacheEntry(object):
-    def __init__(self, path, client, metadata=None, data=None, uploader=None, downloader=None):
+class CacheEntryBase(object):
+    def __init__(self, path, client):
+        # logger
+        self.logger = DropboxLogger(self)
+
         self.path = path
         self.client = client
-        self._metadata = dict() if metadata is None else metadata
-        self._data = data
-        self._uploader = uploader
-        self._downloader = downloader
         self._dirty = False
 
     def fetch(self):
-        # will work only if is_dir is True, else None
-        prev_hash = self._metadata.get('hash')
-        try:
-            metadata = self.client.metadata(self.path, hash=prev_hash)
-            if 'is_deleted' in metadata and metadata['is_deleted'] is True:
-                raise FileNotFoundError('%s is deleted' % self.path)
-        except dropbox.rest.ErrorResponse as e:
-            print e.status, e.reason
-            if 404 == e.status:
-                # not found
-                raise FileNotFoundError(str(e))
-            elif 304 == e.status:
-                # not modified
-                self._dirty = False
-                return self
-            else:
-                raise
-
-        self._metadata = metadata
         self._dirty = False
         return self
 
@@ -94,7 +102,42 @@ class CacheEntry(object):
     @dirty.setter
     def dirty(self, value):
         assert isinstance(value, bool)
+        self.logger.info('%s->dirty = %s', self.path, str(value))
         self._dirty = value
+
+    def __str__(self):
+        return '<cache entry for path %s' % (self.path, )
+
+
+class MetadataCacheEntry(CacheEntryBase):
+    def __init__(self, path, client, metadata=None, data=None, uploader=None, downloader=None):
+        self._metadata = dict() if metadata is None else metadata
+        self._uploader = uploader
+        super(MetadataCacheEntry, self).__init__(path, client)
+
+    def fetch(self):
+        # will work only if is_dir is True, else None
+        prev_hash = self._metadata.get('hash')
+        try:
+            metadata = self.client.metadata(self.path, hash=prev_hash)
+            if 'is_deleted' in metadata and metadata['is_deleted'] is True:
+                self.logger.error('404: %s already marked as deleted', self.path)
+                raise FileNotFoundError('%s is deleted' % self.path)
+        except dropbox.rest.ErrorResponse as e:
+            if 404 == e.status:
+                # not found
+                self.logger.error('404: %s', self.path)
+                raise FileNotFoundError(str(e))
+            elif 304 == e.status:
+                # not modified
+                self.logger.error('304: not modified --> %s', self.path)
+                self._dirty = False
+                return self
+            else:
+                raise
+
+        self._metadata = metadata
+        return super(MetadataCacheEntry, self).fetch()
 
     @property
     def uploader(self):
@@ -107,6 +150,7 @@ class CacheEntry(object):
     @property
     def metadata(self):
         if self.dirty is True:
+            self.logger.info('%s found as dirty, re-fetching', self.path)
             self.fetch()
         return self._metadata
 
@@ -115,27 +159,87 @@ class CacheEntry(object):
         assert isinstance(value, dict)
         self._metadata = value
 
+
+class DataCache(CacheBase):
+    def get_entry(self, path, size, create=True):
+        super(DataCache, self).get_entry(path)
+        cache_entry = self.cache.get(path)
+        if cache_entry is not None:
+            if cache_entry.size != size:
+                self.logger.info('%s: inconsistent size, setting as dirty', path)
+                cache_entry.dirty = True
+            else:
+                # just print, returns cache_entry later
+                self.logger.info('data cache: hit %s', path)
+        else:
+            self.logger.info('data cache miss %s', path)
+            if create is False:
+                return None
+
+            cache_entry = DataCacheEntry(path, size, self.client).fetch()
+            self.set_entry(path, cache_entry)
+
+        return cache_entry
+
+    def set_entry(self, path, entry):
+        assert isinstance(entry, DataCacheEntry), 'expected DataCacheEntry, got %s' % (type(entry), )
+        super(DataCache, self).set_entry(path, entry)
+
+
+class DataCacheEntry(CacheEntryBase):
+    def __init__(self, path, size, client):
+        self.size = size
+        self._fp = None
+        self._fd = None
+        self._buffer = bytearray()
+        super(DataCacheEntry, self).__init__(path, client)
+
+    def fetch(self):
+        try:
+            self._fp = self.client.get_file(self.path)
+            self._fd = self._fp.fileno()
+            self._buffer = bytearray()
+        except dropbox.rest.ErrorResponse as e:
+            if 404 == e.status:
+                # not found
+                self.logger.error('404: %s', self.path)
+                raise FileNotFoundError(str(e))
+            else:
+                self.logger.error('exception: %s', str(e))
+                raise
+        return super(DataCacheEntry, self).fetch()
+
     @property
-    def data(self):
+    def fp(self):
         if self.dirty is True:
-            self._data = None
-        return self._data
+            self.logger.info('%s found as dirty, re-fetching', self.path)
+            self.fetch()
+        return self._fp
 
-    @data.setter
-    def data(self, value):
-        assert isinstance(value, str)
-        self._data = value
+    @fp.setter
+    def fp(self, value):
+        self._fp = value
 
     @property
-    def downloader(self):
-        return self._downloader
+    def buffer(self):
+        if self.dirty is True:
+            self.logger.info('%s found as dirty, re-fetching', self.path)
+            self.fetch()
+        return self._buffer
 
-    @downloader.setter
-    def downloader(self, value):
-        self._downloader = value
+    @buffer.setter
+    def buffer(self, value):
+        self._buffer = value
 
-    def __str__(self):
-        return '<cache entry for path %s: METADATA=%s DATA=%s' % (self.path,
-                                                                  self.metadata is not None,
-                                                                  self.data is not None)
+    @property
+    def fd(self):
+        if self.dirty is True:
+            self.logger.info('%s found as dirty, re-fetching', self.path)
+            self.fetch()
+            self.logger.error('change me!')
+            raise Exception('chenge me!')
+        return self._fd
 
+    @fd.setter
+    def fd(self, value):
+        self._fd = value
