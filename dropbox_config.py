@@ -4,13 +4,18 @@
 import json
 import os
 
-from dropbox_logger import DropboxLogger
+from dropbox_logger import DropboxLogDummy
 
 
 class DropboxConfiguration(dict):
-    def __init__(self, path):
+    def __init__(self, path, log_manager=None):
         # logger
-        self.logger = DropboxLogger(self)
+        if log_manager is None:
+            self.log_manager = None
+            self.logger = DropboxLogDummy()
+        else:
+            self.log_manager = log_manager
+            self.logger = self.log_manager.agent(self)
 
         self.path = path
         if os.path.isfile(path):

@@ -7,12 +7,18 @@ import os
 import dropbox
 from dropbox_exceptions import UploadError
 from dropbox_cache import MetadataCacheEntry
+from dropbox_logger import DropboxLogDummy
 
 
 class DropboxUploader(object):
-    def __init__(self, path, client, overwrite=False):
+    def __init__(self, path, client, overwrite=False, log_manager=None):
         # logger
-        self.logger = DropboxLogger(self)
+        if log_manager is None:
+            self.log_manager = None
+            self.logger = DropboxLogDummy()
+        else:
+            self.log_manager = log_manager
+            self.logger = self.log_manager.agent(self)
 
         self.path = path
         self.client = client
