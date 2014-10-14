@@ -100,6 +100,11 @@ class DropboxDownloadServer(Process):
             if stream.client_sock == sock:
                 return stream
 
+    def _streams_by_fp(self, fp):
+        for stream in self.streams:
+            if stream.dcache_entry.fp is fp:
+                yield stream
+
     def _register_stream(self, stream):
         # assumes that the client socket of the stream
         # is already connected
@@ -107,7 +112,10 @@ class DropboxDownloadServer(Process):
         # make sure the stream fp is accounted for
         if stream.dcache_entry.is_cached is False:
             self._register_input_fd(stream.dcache_entry.fp)
-        self._register_output_fd(stream.client_sock)
+        else:
+            # set the stream as readable if the file is fully cached
+            stream.is_readable = True
+        self._register_input_fd(stream)
 
         self.streams.append(stream)
         self.logger.debug('current streams: %s', str(self.streams))
@@ -117,12 +125,12 @@ class DropboxDownloadServer(Process):
         self.logger.info('un-registering stream for %s', os.path.basename(stream.path))
         self.streams.remove(stream)
 
-        fd = stream.client_sock.fileno()
+        fd = stream.fileno()
         self._unregister_fd(fd)
 
         fp = stream.dcache_entry.fp
         fd = stream.dcache_entry.fd
-        streams_with_fp = filter(lambda s: s.dcache_entry.fp == fp, self.streams)
+        streams_with_fp = list(self._streams_by_fp(fp))
         if len(streams_with_fp) == 0:
             self._unregister_fd(fd)
         self.logger.debug('current streams: %s', str(self.streams))
@@ -177,9 +185,18 @@ class DropboxDownloadServer(Process):
             return
 
         dcache.buffer += buf
+        # iterate over the streams related to the current fp
+        for stream in self._streams_by_fp(dcache.fp):
+            # if the stream is a `FakeFileObject`, trigger it
+            if hasattr(stream, 'is_readable'):
+                stream.is_readable = True
 
     def _handle_client_stream(self, fd):
-        stream = self._stream_by_proxy_client_fd(fd)
+        stream = self.input_fds.get(fd)
+        if stream is None:
+            self.logger.error('stream fd not found in input fds')
+            return
+
         try:
             buf = stream.read(DropboxDownloadServer.BUFSIZE)
         except StreamReadBlock as e:
@@ -187,12 +204,14 @@ class DropboxDownloadServer(Process):
             return
 
         if not buf:
-            self.logger.info('finised uploading %s to proxy', os.path.basename(dcache.path))
-            self.logger.info('removing from output fds..')
+            self.logger.info('finised uploading %s to proxy', os.path.basename(stream.path))
+            self.logger.info('removing from input fds..')
             self._unregister_fd(fd)
+            stream.client_sock.close()
             return
 
         sent = stream.client_sock.send(buf)
+        self.logger.debug('sent %d bytes to client, buf len %d', sent, len(buf))
         if sent != len(buf):
             self.logger.warn('sent != len(buf) -- %d != %d', sent, len(buf))
 
@@ -222,6 +241,10 @@ class DropboxDownloadServer(Process):
                             return
                         self._serve_request(req)
                     else:
-                        self._handle_dcache_loop(fd)
+                        obj = self.input_fds.get(fd)
+                        if isinstance(obj, DownloadStream):
+                            self._handle_client_stream(fd)
+                        else:
+                            self._handle_dcache_loop(fd)
                 elif flags & select.POLLOUT:
-                    self._handle_client_stream(fd)
+                    pass

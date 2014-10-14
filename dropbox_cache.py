@@ -196,7 +196,7 @@ class DataCache(CacheBase):
             if create is False:
                 return None
 
-            cache_entry = DataCacheEntry(path, size, self.client).fetch()
+            cache_entry = DataCacheEntry(path, size, self.client, log_manager=self.log_manager).fetch()
             self.set_entry(path, cache_entry)
 
         return cache_entry
@@ -207,18 +207,19 @@ class DataCache(CacheBase):
 
 
 class DataCacheEntry(CacheEntryBase):
-    def __init__(self, path, size, client):
+    def __init__(self, path, size, client, log_manager=None):
         self.size = size
         self._fp = None
         self._fd = None
         self._buffer = bytearray()
-        super(DataCacheEntry, self).__init__(path, client)
+        super(DataCacheEntry, self).__init__(path, client, log_manager=log_manager)
 
     def fetch(self):
         try:
             self._fp = self.client.get_file(self.path)
             self._fd = self._fp.fileno()
-            self._buffer = bytearray()
+            self._buffer = bytearray(self._fp.read(1))
+            self.logger.debug('_buffer len %d', len(self._buffer))
         except dropbox.rest.ErrorResponse as e:
             if 404 == e.status:
                 # not found

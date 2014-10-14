@@ -165,7 +165,7 @@ class DropboxFuse(fuse.Operations):
             self.logger.error('downloader proxy not found')
             raise fuse.FuseOSError(errno.EBADR)
 
-        buf = proxy.read(size, offset=offset)
+        buf = proxy.read(size)  # , offset=offset)
         self.logger.debug('got %d bytes from proxy', len(buf))
         return buf
 

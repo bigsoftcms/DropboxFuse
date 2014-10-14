@@ -7,9 +7,10 @@ import socket
 from dropbox_logger import DropboxLogDummy
 from dropbox_exceptions import DownloadError, StreamReadBlock
 from dropbox_download_ipc import DownloadResponse
+from dropbox_utils import FakeFileObject
 
 
-class DownloadStream(object):
+class DownloadStream(FakeFileObject):
     def __init__(self, path, dcache_entry, log_manager=None):
         # logger
         if log_manager is None:
@@ -32,8 +33,9 @@ class DownloadStream(object):
         self.server_sock.listen(1)
         self.client_sock = None
         self.client_addr = None
-        self.client_read = 0
+        self.client_pos = 0
         self.logger.info('created stream (%d) for %s', id(self), os.path.basename(self.path))
+        super(DownloadStream, self).__init__()
 
     def __del__(self):
         if self.server_sock is not None:
@@ -54,6 +56,8 @@ class DownloadStream(object):
         return DownloadResponse(addr, port)
 
     def read(self, size):
+        # first, set stream as EWOULDBLOCK
+        self.is_readable = False
         # non blocking read from dcache buffer
         # reads from dcache.buffer only, not from dcache.fp
         if self.dcache_entry.dirty is True:
@@ -61,18 +65,26 @@ class DownloadStream(object):
             self.logger.warn(msg)
             raise DownloadError(msg)
 
-        offset = self.client_read
+        pos = self.client_pos
         dcache = self.dcache_entry
         dcache_buf = dcache.buffer
-        if offset == (dcache.size - 1):
+        if pos == dcache.size:
             # return zero len buffer to indicate eof
             self.logger.debug('%s: end of buffer', os.path.basename(self.path))
             return ''
 
-        if offset >= len(dcache_buf):
-            self.logger.debug('%s: read would block', os.path.basename(self.path))
+        if pos >= len(dcache_buf):
+            self.logger.debug('%s: read would block. pos %d, buf len %d',
+                              os.path.basename(self.path),
+                              pos,
+                              len(dcache_buf))
             raise StreamReadBlock()
 
-        buf = dcache_buf[offset:offset+size]
-        self.client_read += len(buf)
+        buf = dcache_buf[pos:pos+size]
+        self.client_pos += len(buf)
+
+        # set the stream readable if the current buffer contain more data
+        if ((len(dcache_buf) - 1) - self.client_pos) > 0:
+            self.is_readable = True
+
         return buf
