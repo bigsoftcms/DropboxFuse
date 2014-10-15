@@ -6,7 +6,7 @@ import select
 from multiprocessing import Process
 from urllib3.exceptions import HTTPError
 
-from dropbox_logger import DropboxLogDummy
+from dropbox_logger import DropboxLogManager
 from dropbox_exceptions import StreamReadBlock
 from dropbox_cache import DataCache
 from dropbox_exceptions import FileNotFoundError
@@ -21,20 +21,13 @@ class DropboxDownloadServer(Process):
     READ_ONLY = select.POLLIN | select.POLLPRI | ERR_ONLY
     WRITE_ONLY = select.POLLOUT | ERR_ONLY
     READ_WRITE = READ_ONLY | WRITE_ONLY
-    BUFSIZE = 1 * 1024 * 1024
+    BUFSIZE = 4 * 1024 * 1024
 
-    def __init__(self, dbclient, control_sock, log_manager=None):
-        # logger
-        if log_manager is None:
-            self.log_manager = None
-            self.logger = DropboxLogDummy()
-        else:
-            self.log_manager = log_manager
-            self.logger = self.log_manager.agent(self)
-
+    def __init__(self, dbclient, control_sock):
+        self.logger = DropboxLogManager.get_logger(self)
         self.dbclient = dbclient
         self.control_sock = control_sock
-        self.dcache = DataCache(self.dbclient, log_manager=self.log_manager)
+        self.dcache = DataCache(self.dbclient)
         self.streams = list()
 
         # for poll()
@@ -146,7 +139,7 @@ class DropboxDownloadServer(Process):
                 self.control_sock.send(e)
                 return
 
-            stream = DownloadStream(req.path, dcache_entry, log_manager=self.log_manager)
+            stream = DownloadStream(req.path, dcache_entry)
             resp = stream.prepare_response()
             self.control_sock.send(resp)
             stream.accept_connection()
@@ -213,7 +206,7 @@ class DropboxDownloadServer(Process):
         sent = stream.client_sock.send(buf)
         self.logger.debug('sent %d bytes to client, buf len %d', sent, len(buf))
         if sent != len(buf):
-            self.logger.warn('sent != len(buf) -- %d != %d', sent, len(buf))
+            self.logger.ERROR('sent != len(buf) -- %d != %d', sent, len(buf))
 
     def run(self):
         while True:

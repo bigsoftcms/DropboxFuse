@@ -26,10 +26,13 @@ def download_file(download_manager, filename):
 def main():
     config_file = os.path.join(os.getenv('HOME'), '.dropboxfuse')
     log = DropboxLogManager()
-    client = DropboxClient(config_file, log_manager=log)
-    CacheManager.set_cache('MetadataCache', MetadataCache(client, log_manager=log))
-    download_manager = DropboxDownloadManager(client, log_manager=log)
-    buf = download_file(download_manager, '/app.apk')
+    client = DropboxClient(config_file)
+    CacheManager.set_cache('MetadataCache', MetadataCache(client))
+    download_manager = DropboxDownloadManager(client)
+    buf = download_file(download_manager, '/TWRP/lge_g2/2014-08-08--08-03-26 KOT49I.D80220a/boot.emmc.win.md5')
+    print 'md5', buf
+    buf = download_file(download_manager, '/TWRP/lge_g2/2014-08-08--08-03-26 KOT49I.D80220a/boot.emmc.win')
+    open('/tmp/boot.emmc.win', 'wb').write(buf)
     print 'YAY', len(buf)
     #print download_file(download_manager, '/hello.txt')
     #print download_file(download_manager, '/hello.txt')

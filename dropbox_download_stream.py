@@ -4,22 +4,15 @@
 import os
 import socket
 
-from dropbox_logger import DropboxLogDummy
+from dropbox_logger import DropboxLogManager
 from dropbox_exceptions import DownloadError, StreamReadBlock
 from dropbox_download_ipc import DownloadResponse
 from dropbox_utils import FakeFileObject
 
 
 class DownloadStream(FakeFileObject):
-    def __init__(self, path, dcache_entry, log_manager=None):
-        # logger
-        if log_manager is None:
-            self.log_manager = None
-            self.logger = DropboxLogDummy()
-        else:
-            self.log_manager = log_manager
-            self.logger = self.log_manager.agent(self)
-
+    def __init__(self, path, dcache_entry):
+        self.logger = DropboxLogManager.get_logger(self)
         self.path = path
         self.dcache_entry = dcache_entry
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -56,6 +49,7 @@ class DownloadStream(FakeFileObject):
         return DownloadResponse(addr, port)
 
     def read(self, size):
+        self.logger.debug('%s: read size %d', self.path, size)
         # first, set stream as EWOULDBLOCK
         self.is_readable = False
         # non blocking read from dcache buffer
@@ -82,6 +76,9 @@ class DownloadStream(FakeFileObject):
 
         buf = dcache_buf[pos:pos+size]
         self.client_pos += len(buf)
+
+        if 0 == len(buf):
+            self.logger.warn('read buffer is len(0)')
 
         # set the stream readable if the current buffer contain more data
         if ((len(dcache_buf) - 1) - self.client_pos) > 0:

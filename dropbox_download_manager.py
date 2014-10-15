@@ -3,7 +3,7 @@
 
 import socket
 
-from dropbox_logger import DropboxLogDummy
+from dropbox_logger import DropboxLogManager
 from dropbox_exceptions import DownloadError
 from dropbox_cache import CacheManager
 from dropbox_download_ipc import ControlSocket, DownloadShutdownRequest
@@ -14,22 +14,15 @@ from dropbox_download_client import DropboxDownloadProxy
 
 
 class DropboxDownloadManager(object):
-    def __init__(self, dbclient, log_manager=None):
-        # logger
-        if log_manager is None:
-            self.log_manager = None
-            self.logger = DropboxLogDummy()
-        else:
-            self.log_manager = log_manager
-            self.logger = self.log_manager.agent(self)
-
+    def __init__(self, dbclient):
+        self.logger = DropboxLogManager.get_logger(self)
         self.dbclient = dbclient
         server_sock, client_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
         self.control_sock = ControlSocket(client_sock)
         self.mcache = CacheManager.get_cache('MetadataCache')
         self.downloads = dict()
         self.next_fd = 0
-        self.server = DropboxDownloadServer(self.dbclient, ControlSocket(server_sock), log_manager=self.log_manager)
+        self.server = DropboxDownloadServer(self.dbclient, ControlSocket(server_sock))
         self.server.start()
 
     def __del__(self):
@@ -62,7 +55,7 @@ class DropboxDownloadManager(object):
             raise DownloadError(remote_path)
 
         self.logger.info('got DownloadResponse: %s:%d', resp.stream_addr, resp.stream_port)
-        proxy = DropboxDownloadProxy(remote_path, resp.stream_addr, resp.stream_port, log_manager=self.log_manager)
+        proxy = DropboxDownloadProxy(remote_path, resp.stream_addr, resp.stream_port)
         proxy.connect()
 
         fd = int(self.next_fd)

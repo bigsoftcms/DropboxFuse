@@ -47,15 +47,16 @@ class DropboxLogServer(multiprocessing.Process):
         super(DropboxLogServer, self).__init__()
 
     def run(self):
-        self.logger = logging.getLogger()
-        self.logger.setLevel(logging.DEBUG)
+        root = logging.getLogger()
+        root.setLevel(logging.DEBUG)
         # create console handler and set level to debug
         handler = logging.StreamHandler()
         handler.setLevel(logging.DEBUG)
         # create formatter
         formatter = logging.Formatter('%(asctime)s %(name)-24s %(levelname)-10s %(message)s')
         handler.setFormatter(formatter)
-        self.logger.addHandler(handler)
+        root.addHandler(handler)
+
         while True:
             try:
                 record = self.queue.get()
@@ -73,41 +74,16 @@ class DropboxLogServer(multiprocessing.Process):
                 traceback.print_exc(file=sys.stderr)
 
 
-class DropboxLogAgent(object):
-    def __init__(self, module, queue):
-        self.queue = queue
-        if isinstance(module, (str, unicode)):
-            self.module = module
-        else:
-            self.module = module.__class__.__name__
-
-        # create logger
-        self.logger = logging.getLogger(self.module)
-        self.logger.addHandler(QueueHandler(self.queue))
-        self.logger.setLevel(logging.DEBUG)
-
-    def debug(self, *args, **kwargs):
-        self.logger.debug(*args, **kwargs)
-
-    def info(self, *args, **kwargs):
-        self.logger.info(*args, **kwargs)
-
-    def warn(self, *args, **kwargs):
-        self.logger.warn(*args, **kwargs)
-
-    def error(self, *args, **kwargs):
-        self.logger.error(*args, **kwargs)
-
-    def critical(self, *args, **kwargs):
-        self.logger.critical(*args, **kwargs)
-
-
 class DropboxLogManager(object):
     def __init__(self):
-        #self.manager = multiprocessing.Manager()
         self.queue = multiprocessing.Queue()
+        # create the log server
         self.process = DropboxLogServer(self.queue)
         self.start()
+        # set root logger handlers
+        root = logging.getLogger()
+        root.addHandler(QueueHandler(self.queue))
+        root.setLevel(logging.DEBUG)
 
     def __del__(self):
         self.stop()
@@ -117,14 +93,10 @@ class DropboxLogManager(object):
 
     def stop(self):
         self.queue.put(None)
-        self.process.join()
+        self.process.join(timeout=60)
 
-    def agent(self, name):
-        return DropboxLogAgent(name, self.queue)
-
-
-class DropboxLogDummy(object):
-    def dummy(self, *args, **kwargs):
-        pass
-
-    debug = info = warn = error = critical = dummy
+    @staticmethod
+    def get_logger(module):
+        if not isinstance(module, (str, unicode)):
+            module = module.__class__.__name__
+        return logging.getLogger(module)

@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 
 import os
+import random
 import dropbox
 from dropbox_exceptions import FileNotFoundError
-from dropbox_logger import DropboxLogDummy
+from dropbox_logger import DropboxLogManager
 
 
 class CacheManager(object):
@@ -20,15 +21,8 @@ class CacheManager(object):
 
 
 class CacheBase(object):
-    def __init__(self, client, log_manager=None):
-        # logger
-        if log_manager is None:
-            self.log_manager = None
-            self.logger = DropboxLogDummy()
-        else:
-            self.log_manager = log_manager
-            self.logger = self.log_manager.agent(self)
-
+    def __init__(self, client):
+        self.logger = DropboxLogManager.get_logger(self)
         self.cache = dict()
         self.client = client
 
@@ -88,15 +82,8 @@ class MetadataCache(CacheBase):
 
 
 class CacheEntryBase(object):
-    def __init__(self, path, client, log_manager=None):
-        # logger
-        if log_manager is None:
-            self.log_manager = None
-            self.logger = DropboxLogDummy()
-        else:
-            self.log_manager = log_manager
-            self.logger = self.log_manager.agent(self)
-
+    def __init__(self, path, client):
+        self.logger = DropboxLogManager.get_logger(self)
         self.path = path
         self.client = client
         self._dirty = False
@@ -113,7 +100,7 @@ class CacheEntryBase(object):
     @dirty.setter
     def dirty(self, value):
         assert isinstance(value, bool)
-        self.logger.info('%s->dirty = %s', self.path, str(value))
+        self.logger.debug('%s->dirty = %s', self.path, str(value))
         self._dirty = value
 
     @property
@@ -123,6 +110,7 @@ class CacheEntryBase(object):
     @is_cached.setter
     def is_cached(self, value):
         assert isinstance(value, bool)
+        self.logger.debug('%s->is_cached= %s', self.path, str(value))
         self._is_cached = value
 
     def __str__(self):
@@ -196,7 +184,7 @@ class DataCache(CacheBase):
             if create is False:
                 return None
 
-            cache_entry = DataCacheEntry(path, size, self.client, log_manager=self.log_manager).fetch()
+            cache_entry = DataCacheEntry(path, size, self.client).fetch()
             self.set_entry(path, cache_entry)
 
         return cache_entry
@@ -207,19 +195,23 @@ class DataCache(CacheBase):
 
 
 class DataCacheEntry(CacheEntryBase):
-    def __init__(self, path, size, client, log_manager=None):
+    def __init__(self, path, size, client):
         self.size = size
         self._fp = None
         self._fd = None
         self._buffer = bytearray()
-        super(DataCacheEntry, self).__init__(path, client, log_manager=log_manager)
+        super(DataCacheEntry, self).__init__(path, client)
 
     def fetch(self):
         try:
             self._fp = self.client.get_file(self.path)
             self._fd = self._fp.fileno()
             self._buffer = bytearray(self._fp.read(1))
-            self.logger.debug('_buffer len %d', len(self._buffer))
+            self.logger.info('_buffer len %d self(%d) buffer(%d) rand(%d)',
+                              len(self._buffer),
+                              id(self),
+                              id(self._buffer),
+                              random.randint(0, 11111111111111111111111))
         except dropbox.rest.ErrorResponse as e:
             if 404 == e.status:
                 # not found
