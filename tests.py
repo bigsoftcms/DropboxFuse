@@ -1,5 +1,8 @@
 #!/usr/bin/python2
 # -*- coding: utf-8 -*-
+"""
+	Used to test simple flows without fuse
+"""
 
 import sys
 import os
@@ -29,13 +32,7 @@ def main():
     client = DropboxClient(config_file)
     CacheManager.set_cache('MetadataCache', MetadataCache(client))
     download_manager = DropboxDownloadManager(client)
-    buf = download_file(download_manager, '/TWRP/lge_g2/2014-08-08--08-03-26 KOT49I.D80220a/boot.emmc.win.md5')
-    print 'md5', buf
-    buf = download_file(download_manager, '/TWRP/lge_g2/2014-08-08--08-03-26 KOT49I.D80220a/boot.emmc.win')
-    open('/tmp/boot.emmc.win', 'wb').write(buf)
-    print 'YAY', len(buf)
-    #print download_file(download_manager, '/hello.txt')
-    #print download_file(download_manager, '/hello.txt')
+    print download_file(download_manager, '/hello.txt')
 
     del download_manager
     del client
